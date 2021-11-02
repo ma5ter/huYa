@@ -2,6 +2,7 @@ package hu.yandex;
 
 import android.util.Log;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -88,4 +89,29 @@ public class Reflector {
             }
         }
     }
+
+	public void logFields() {
+		if (log) {
+			Log.d(TAG, "Fields of " + clazz.getCanonicalName());
+			final Field[] fields = clazz.getDeclaredFields();
+			for (Field field : fields) {
+				Log.d(TAG, "  " + field);
+			}
+		}
+	}
+
+	public void logValues() {
+		if (log && instance != null) {
+			Log.d(TAG, "Fields of " + instance);
+			final Field[] fields = clazz.getDeclaredFields();
+			for (Field field : fields) {
+				try {
+					Log.d(TAG, "  " + field + " = " + field.get(instance));
+				}
+				catch (IllegalAccessException e) {
+					Log.d(TAG, "  " + field + " <no access>");
+				}
+			}
+		}
+	}
 }

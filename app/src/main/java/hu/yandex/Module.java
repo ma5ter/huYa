@@ -1,20 +1,24 @@
 package hu.yandex;
 
+import static hu.yandex.Gag.findAndHookMethod;
+import static hu.yandex.Gag.getHookParamArgs;
+import static hu.yandex.Gag.logHooker;
+
+import android.app.AndroidAppHelper;
+import android.app.Application;
 import android.content.Context;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
-import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.Arrays;
 import java.util.Date;
-import java.util.Objects;
 import java.util.Random;
-import java.util.regex.Pattern;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -22,6 +26,7 @@ import de.robv.android.xposed.XC_MethodReplacement;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
+import de.robv.android.xposed.callbacks.XCallback;
 
 public class Module implements IXposedHookLoadPackage {
 	// gag replacement
@@ -43,65 +48,6 @@ public class Module implements IXposedHookLoadPackage {
 		}
 	};
 
-	@Nullable
-	private static XC_MethodHook.Unhook findAndHookMethod(Class<?> clazz, String methodName, Object... parameterTypesAndCallback) {
-		try {
-			XC_MethodHook.Unhook unhook = XposedHelpers.findAndHookMethod(clazz, methodName, parameterTypesAndCallback);
-			XposedBridge.log("=== Hooker for " + unhook.getHookedMethod());
-			return unhook;
-		}
-		catch (NoSuchMethodError e) {
-			final StringBuilder builder = new StringBuilder();
-			boolean hasParams = false;
-			builder.append("=== No hooker for ").append(clazz.getCanonicalName()).append('.').append(methodName).append('(');
-			for (final Object arg : parameterTypesAndCallback) {
-				if (arg instanceof Class) {
-					if (hasParams) builder.append(",");
-					builder.append(((Class<?>) arg).getCanonicalName());
-					hasParams = true;
-				}
-			}
-			builder.append(')');
-			XposedBridge.log(builder.toString());
-			return null;
-		}
-	}
-
-	private static void logHooker(@NonNull XC_MethodHook.MethodHookParam param) {
-		final StringBuilder builder = new StringBuilder();
-		boolean hasParams = false;
-		builder.append("=== Called ").append(param.method.getName()).append('(');
-		for (final Object arg : param.args) {
-			if (hasParams) builder.append(",");
-			builder.append(arg);
-			hasParams = true;
-		}
-		builder.append(')');
-		final Object result = param.getResult();
-		if (result != null) {
-			builder.append(" -> ").append(result);
-		}
-		XposedBridge.log(builder.toString());
-	}
-
-	@NonNull
-	private static Object[] getHookParamArgs(@NonNull Class<?>[] classes, XC_MethodHook replacement) {
-		final Object[] args = new Object[classes.length + 1];
-		System.arraycopy(classes, 0, args, 0, classes.length);
-		args[classes.length] = replacement;
-		return args;
-	}
-
-	@NonNull
-	private static Object[] getHookParamArgs(@NonNull Method method, XC_MethodHook replacement) {
-		return getHookParamArgs(method.getParameterTypes(), replacement);
-	}
-
-	@NonNull
-	private static Object[] getHookParamArgs(@NonNull Constructor<?> constructor, XC_MethodHook replacement) {
-		return getHookParamArgs(constructor.getParameterTypes(), replacement);
-	}
-
 	private static void gagVoidMethods(@NonNull Class<?> clazz, String... exclude) {
 		final Method[] metricaMethods = clazz.getDeclaredMethods();
 		for (Method method : metricaMethods) {
@@ -111,63 +57,6 @@ public class Module implements IXposedHookLoadPackage {
 					findAndHookMethod(clazz, name, getHookParamArgs(method, voidMethodGagReplacement));
 				}
 			}
-		}
-	}
-
-	@NonNull
-	private static Object forgeGagObject(@NonNull Class<?> clazz, @NonNull String recursivePrefixFilter) {
-		XposedBridge.log("=== Forging: " + clazz.getCanonicalName());
-
-		// hook all constructors first
-		final Constructor<?>[] constructors = clazz.getDeclaredConstructors();
-		if (constructors.length < 1) return null;
-
-		boolean shouldHook = false;
-		if (null == recursivePrefixFilter || Objects.requireNonNull(clazz.getCanonicalName()).startsWith(recursivePrefixFilter)) {
-			if (null == XposedHelpers.getAdditionalStaticField(clazz, "alreadyHooked")) {
-				shouldHook = true;
-			}
-		}
-
-		XposedBridge.log("===   should hook: " + shouldHook);
-
-		Constructor<?> simpleConstructor = null;
-		Class<?>[] simpleParameterTypes = null;
-		int count = Integer.MAX_VALUE;
-		for (Constructor<?> constructor : constructors) {
-			XposedBridge.log("===   constructor: " + constructor);
-			final Class<?>[] parameterTypes = constructor.getParameterTypes();
-			// publicize constructors
-			if (!constructor.isAccessible()) {
-				constructor.setAccessible(true);
-			}
-			// hook gag replacement
-			if (shouldHook) {
-				XposedHelpers.findAndHookConstructor(clazz, getHookParamArgs(parameterTypes, constructorGagReplacement));
-			}
-			if (count > parameterTypes.length) {
-				count = parameterTypes.length;
-				simpleConstructor = constructor;
-				simpleParameterTypes = parameterTypes;
-			}
-		}
-		XposedHelpers.setAdditionalStaticField(clazz, "alreadyHooked", true);
-
-		// call constructor with less parameters count
-		final Object[] args = new Object[simpleParameterTypes.length];
-		for (int i = 0; i < simpleParameterTypes.length; ++i) {
-			// when recursivePrefixFilter is not null will forge all parameters objects otherwise pass nulls
-			args[i] = (recursivePrefixFilter == null) ? null : forgeGagObject(simpleParameterTypes[i], recursivePrefixFilter);
-		}
-
-		try {
-			final Object instance = simpleConstructor.newInstance(args);
-			XposedBridge.log("===   forged: " + instance);
-			return instance;
-		}
-		catch (Exception e) {
-			XposedBridge.log("===   null forged: " + clazz.getCanonicalName() + " (" + e.getMessage() + ")");
-			return null;
 		}
 	}
 
@@ -541,86 +430,70 @@ public class Module implements IXposedHookLoadPackage {
 		gagVoidMethods(metricaClass, "activate", "requestAppMetricaDeviceID");
 	}
 
-	private static void doAnalytics(@NonNull final ClassLoader classLoader) {
-		final Class<?> analyticsClass;
+	private static void doFirebase(@NonNull final Forgery forgery) {
 		try {
-			analyticsClass = classLoader.loadClass("com.google.firebase.analytics.FirebaseAnalytics");
+			final Class<?> clazz = forgery.getClassLoader().loadClass("com.google.firebase.FirebaseApp");
+			XposedBridge.log("=== Found: " + clazz);
+			forgery.forge(clazz);
+
+			XposedHelpers.findAndHookMethod(clazz, "get", Class.class, new XC_MethodReplacement(XCallback.PRIORITY_HIGHEST) {
+				@Override
+				protected Object replaceHookedMethod(MethodHookParam param) throws Throwable {
+					return forgery.forge((Class<?>) param.args[0]);
+				}
+			});
 		}
 		catch (ClassNotFoundException e) {
 			// means not included in app
-			return;
 		}
-		XposedBridge.log("=== Found: " + analyticsClass.getCanonicalName());
-
-		final Reflector analytics = new Reflector(analyticsClass, null);
-		analytics.logMethods();
-
-		// Mock FirebaseAnalytics
-		Object instance = forgeGagObject(analyticsClass, "com.google.");
-
-		findAndHookMethod(analyticsClass, "getInstance",
-			Context.class,
-			new XC_MethodReplacement() {
-				@Override
-				protected Object replaceHookedMethod(MethodHookParam param) {
-					logHooker(param);
-					return instance;
-				}
-			});
-
-		gagVoidMethods(analyticsClass);
-
-
-		XposedHelpers.findAndHookMethod("android.app.ActivityThread", classLoader, "installProvider",
-			Context.class, "android.app.ContentProviderHolder", "android.content.pm.ProviderInfo", boolean.class, boolean.class, boolean.class,
-			new XC_MethodHook() {
-				@Override
-				protected void beforeHookedMethod(MethodHookParam param) {
-					logHooker(param);
-					// return passed android.app.ContentProviderHolder
-					param.setResult(param.args[1]);
-
-
-					try {
-						final Reflector r = new Reflector("android.content.pm.ProviderInfo", classLoader, param.args[2]);
-						r.logMethods();
-						// TODO:
-						r.logFields();
-						r.logValues();
-					}
-					catch (ClassNotFoundException e) {
-						e.printStackTrace();
-					}
-
-				}
-			});
-
+		catch (IllegalAccessException e) {
+			e.printStackTrace();
+		}
+		catch (InstantiationException e) {
+			e.printStackTrace();
+		}
+		catch (InvocationTargetException e) {
+			e.printStackTrace();
+		}
 	}
 
-	private static void doCrashlytics(@NonNull final ClassLoader classLoader) {
-		// NOTE: com.google.firebase.crashlytics.FirebaseCrashlytics class is obfuscated
-		final Class<?> crashlyticsClass;
+	private static void doAnalytics(@NonNull final Forgery forgery) {
 		try {
-			crashlyticsClass = classLoader.loadClass("com.google.firebase.crashlytics.a");
+			final Object FirebaseAnalytics = forgery.forge("com.google.firebase.analytics.FirebaseAnalytics");
+			XposedBridge.log("=== Found: " + FirebaseAnalytics);
 		}
 		catch (ClassNotFoundException e) {
-			e.printStackTrace();
-			return;
+			// means not included in app
 		}
-		XposedBridge.log("=== Found: " + crashlyticsClass.getCanonicalName());
+		catch (IllegalAccessException e) {
+			e.printStackTrace();
+		}
+		catch (InstantiationException e) {
+			e.printStackTrace();
+		}
+		catch (InvocationTargetException e) {
+			e.printStackTrace();
+		}
+	}
 
-		final Reflector crashlytics = new Reflector(crashlyticsClass, null);
-		crashlytics.logMethods();
-
-		findAndHookMethod(crashlyticsClass, "getLibraryApiLevel",
-			new XC_MethodHook() {
-				@Override
-				protected void afterHookedMethod(MethodHookParam param) {
-					logHooker(param);
-				}
-			});
-
-		gagVoidMethods(crashlyticsClass);
+	private static void doCrashlytics(@NonNull final Forgery forgery) {
+		// NOTE: com.google.firebase.crashlytics.FirebaseCrashlytics class is obfuscated
+		try {
+			final Object FirebaseCrashlytics = forgery.forge("com.google.firebase.crashlytics.a");
+			XposedBridge.log("=== Found: " + FirebaseCrashlytics);
+		}
+		catch (ClassNotFoundException e) {
+			// means not included in app
+		}
+		catch (IllegalAccessException e) {
+			e.printStackTrace();
+		}
+		catch (InstantiationException e) {
+			e.printStackTrace();
+		}
+		catch (InvocationTargetException e) {
+			e.printStackTrace();
+		}
 	}
 
 	@Override
@@ -628,9 +501,56 @@ public class Module implements IXposedHookLoadPackage {
 		XposedBridge.log("=== Loaded app: " + lpparam.packageName);
 		final ClassLoader classLoader = lpparam.classLoader;
 
+		Forgery forgery = new Forgery(classLoader, new String[] {
+			"com.google.firebase.",
+		}, new Object[]{
+			"=str=",
+		} );
+
+		try {
+			forgery.with(Object.class, "==obj=");
+			forgery.with(Context.class, new DummyContext());
+		}
+		catch (Exception e) {
+			e.printStackTrace();
+		}
+
 		doMetrica(classLoader);
-		doAnalytics(classLoader);
-		doCrashlytics(classLoader);
+		doFirebase(forgery);
+		doAnalytics(forgery);
+		doCrashlytics(forgery);
+
+		// content providers
+		try {
+			final Class<?> activityThreadClass = classLoader.loadClass("android.app.ActivityThread");
+			findAndHookMethod(activityThreadClass, "installProvider",
+				Context.class, "android.app.ContentProviderHolder", "android.content.pm.ProviderInfo", boolean.class, boolean.class, boolean.class,
+				new XC_MethodHook() {
+					@Override
+					protected void beforeHookedMethod(MethodHookParam param) {
+						logHooker(param);
+						// TODO: filter out trashy content providers
+
+						// return passed android.app.ContentProviderHolder
+						param.setResult(param.args[1]);
+
+						try {
+							XposedBridge.log("=== Installing Content Provider");
+							final Reflector r = new Reflector("android.content.pm.ProviderInfo", classLoader, param.args[2]);
+							r.logMethods();
+							r.logValues();
+						}
+						catch (ClassNotFoundException e) {
+							XposedBridge.log("=== WTF? No such class: android.content.pm.ProviderInfo");
+						}
+
+					}
+				});
+		}
+		catch (ClassNotFoundException e) {
+			e.printStackTrace();
+		}
+
 
 		// com.google.firebase.FirebaseOptions
 		// com.yandex.metrica.MetricaService
